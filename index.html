@@ -115,6 +115,7 @@ let pixelClicks = []; // pending pixel click waiting for map pair
 let gcps = []; // {col,row, lon,lat}
 let transform = null; // {A,B,C,D,E,F}
 let overlay = null; // Leaflet ImageOverlay
+let gcpMarkers = []; // Leaflet markers for GCPs
 
 /*** --- Image pane --- ***/
 document.getElementById('file').addEventListener('change', ev => {
@@ -147,6 +148,7 @@ imgCanvas.addEventListener('click', ev => {
   const col = x * (img.width / imgCanvas.width);
   const row = y * (img.height / imgCanvas.height);
   pixelClicks.push({col, row});
+  redrawGcpDots();
   setStatus("Image point set. Click the map to pair it.", "ok");
 });
 
@@ -164,6 +166,8 @@ map.on('click', ev => {
   const pending = pixelClicks.shift();
   const {lat, lng} = ev.latlng;
   gcps.push({ col: pending.col, row: pending.row, lon: lng, lat: lat });
+  const marker = L.circleMarker([lat, lng], {radius:4, color:'#ff2d00', fillColor:'#ff2d00', fillOpacity:1}).addTo(map);
+  gcpMarkers.push(marker);
   updateGcpsTable();
   redrawGcpDots();
   setStatus("GCP added.", "ok");
@@ -189,6 +193,8 @@ function updateGcpsTable() {
     btn.addEventListener('click', () => {
       const i = +btn.dataset.i;
       gcps.splice(i,1);
+      gcpMarkers[i].remove();
+      gcpMarkers.splice(i,1);
       updateGcpsTable();
       redrawGcpDots();
     });
@@ -199,6 +205,8 @@ document.getElementById('clearGcps').addEventListener('click', () => {
   gcps = [];
   pixelClicks = [];
   transform = null;
+  gcpMarkers.forEach(m => m.remove());
+  gcpMarkers = [];
   updateGcpsTable();
   redrawGcpDots();
   document.getElementById('wldPreview').textContent = '(fit to show)';
@@ -216,6 +224,14 @@ function redrawGcpDots() {
   gcps.forEach(g => {
     const x = g.col * (imgCanvas.width / img.width);
     const y = g.row * (imgCanvas.height / img.height);
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI*2);
+    ctx.fill();
+  });
+  ctx.fillStyle = '#0086ff';
+  pixelClicks.forEach(p => {
+    const x = p.col * (imgCanvas.width / img.width);
+    const y = p.row * (imgCanvas.height / img.height);
     ctx.beginPath();
     ctx.arc(x, y, 4, 0, Math.PI*2);
     ctx.fill();
