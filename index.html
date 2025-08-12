@@ -1,1 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>In-Browser Georeferencer (Affine → World File)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;}
+    .app { display: grid; grid-template-columns: 420px 1fr; height: 100%; }
+    .left { padding: 12px; overflow: auto; border-right: 1px solid #ddd; }
+    .right { display: grid; grid-template-rows: 1fr 180px; }
+    #imgPane { border: 1px solid #ccc; width: 100%; height: 420px; display:flex; align-items:center; justify-content:center; background:#f8f8f8;}
+    #imgCanvas { max-width: 100%; max-height: 100%; }
+    #map { width: 100%; height: 100%; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 4px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button { cursor: pointer; }
+    .badge { display:inline-block; padding:2px 6px; background:#eee; border-radius:6px; margin-left:6px; font-size:12px; }
+    .warn { color: #b00020; }
+    .ok { color: #0a7f2e; }
+    .controls { display:flex; flex-wrap:wrap; gap:8px; align-items: center; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: pre; background: #fafafa; border: 1px solid #eee; padding: 8px; }
+  </style>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+<div class="app">
+  <div class="left">
+    <h2>Image</h2>
+    <input type="file" id="file" accept="image/*" />
+    <div id="imgPane"><canvas id="imgCanvas"></canvas></div>
+    <p>Click the image to add a pixel point. Then click the map to set its ground location.</p>
 
+    <h3>Control Points</h3>
+    <table id="gcpsTable">
+      <thead><tr>
+        <th>#</th><th>Pixel (col,row)</th><th>Map (lon,lat)</th><th>Res (m)</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="controls" style="margin-top:8px;">
+      <button id="clearGcps">Clear GCPs</button>
+      <span id="rms" class="badge">RMS: —</span>
+      <span id="status"></span>
+    </div>
+
+    <h3>CRS & Output</h3>
+    <div class="row">
+      <label>CRS
+        <select id="crs">
+          <option value="EPSG:4326">EPSG:4326 (WGS84)</option>
+          <option value="EPSG:3857">EPSG:3857 (Web Mercator)</option>
+          <option value="CUSTOM">Custom WKT (paste below)</option>
+        </select>
+      </label>
+      <label>World file ext
+        <select id="wldExt">
+          <option value=".wld">.wld</option>
+          <option value=".jgw">.jgw (JPEG)</option>
+          <option value=".pgw">.pgw (PNG)</option>
+          <option value=".tfw">.tfw (TIFF)</option>
+        </select>
+      </label>
+    </div>
+    <label>Custom WKT (optional)</label>
+    <textarea id="wkt" rows="5" placeholder="Paste CRS WKT here for .prj"></textarea>
+
+    <div class="controls" style="margin-top:8px;">
+      <button id="fit">Fit Transform</button>
+      <button id="downloadWld" disabled>Download World File</button>
+      <button id="downloadPrj">Download .prj</button>
+    </div>
+
+    <h3>World File Preview</h3>
+    <pre id="wldPreview" class="code">(fit to show)</pre>
+  </div>
+
+  <div class="right">
+    <div id="map"></div>
+    <div style="padding:8px; border-top:1px solid #ddd;">
+      <strong>Map preview:</strong> After “Fit Transform”, your image appears on the map using the same affine as the world file. Check alignment visually.
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/proj4@2.11.0/dist/proj4.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet-src.js"></script>
+<script>
+/*** --- Simple CRS support: WKT strings for common codes --- ***/
+const WKT_DICT = {
+  "EPSG:4326": `GEOGCRS["WGS 84",
+    DATUM["World Geodetic System 1984",
+      ELLIPSOID["WGS 84",6378137,298.257223563]],
+    PRIMEM["Greenwich",0],
+    CS[ellipsoidal,2],
+    AXIS["latitude",north],
+    AXIS["longitude",east],
+    ANGLEUNIT["degree",0.0174532925199433]]`,
+  "EPSG:3857": `PROJCRS["WGS 84 / Pseudo-Mercator",
+    BASEGEOGCRS["WGS 84"],
+    CONVERSION["Popular Visualisation Pseudo Mercator"],
+    CS[Cartesian,2],
+    AXIS["easting",east,ORDER[1]],
+    AXIS["northing",north,ORDER[2]],
+    LENGTHUNIT["metre",1]]`
+};
+
+/*** --- State --- ***/
+let img = new Image();
+let imgCanvas = document.getElementById('imgCanvas');
+let ctx = imgCanvas.getContext('2d');
+let imgLoaded = false;
+let pixelClicks = []; // pending pixel click waiting for map pair
+let gcps = []; // {col,row, lon,lat}
+let transform = null; // {A,B,C,D,E,F}
+let overlay = null; // Leaflet ImageOverlay
+
+/*** --- Image pane --- ***/
+document.getElementById('file').addEventListener('change', ev => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  img.onload = () => {
+    // Resize canvas to fit panel but keep aspect
+    const pane = document.getElementById('imgPane');
+    const maxW = pane.clientWidth - 4;
+    const maxH = pane.clientHeight - 4;
+    const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+    imgCanvas.width = Math.round(img.width * scale);
+    imgCanvas.height = Math.round(img.height * scale);
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0,0,imgCanvas.width,imgCanvas.height);
+    ctx.drawImage(img, 0, 0, imgCanvas.width, imgCanvas.height);
+    imgLoaded = true;
+    redrawGcpDots();
+  };
+  img.src = url;
+});
+
+imgCanvas.addEventListener('click', ev => {
+  if (!imgLoaded) return;
+  const rect = imgCanvas.getBoundingClientRect();
+  const x = ev.clientX - rect.left;
+  const y = ev.clientY - rect.top;
+  // Convert back to native pixel coordinates
+  const col = x * (img.width / imgCanvas.width);
+  const row = y * (img.height / imgCanvas.height);
+  pixelClicks.push({col, row});
+  setStatus("Image point set. Click the map to pair it.", "ok");
+});
+
+/*** --- Leaflet map --- ***/
+const map = L.map('map').setView([0,0], 2);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+map.on('click', ev => {
+  if (pixelClicks.length === 0) {
+    setStatus("Click the image first to pick a pixel point.", "warn");
+    return;
+  }
+  const pending = pixelClicks.shift();
+  const {lat, lng} = ev.latlng;
+  gcps.push({ col: pending.col, row: pending.row, lon: lng, lat: lat });
+  updateGcpsTable();
+  redrawGcpDots();
+  setStatus("GCP added.", "ok");
+});
+
+/*** --- GCP table --- ***/
+function updateGcpsTable() {
+  const tbody = document.querySelector('#gcpsTable tbody');
+  tbody.innerHTML = "";
+  const res = transform ? residuals(gcps, transform) : [];
+  gcps.forEach((g, i) => {
+    const tr = document.createElement('tr');
+    const r = res[i] || {err: null};
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td>${g.col.toFixed(1)}, ${g.row.toFixed(1)}</td>
+      <td>${g.lon.toFixed(6)}, ${g.lat.toFixed(6)}</td>
+      <td>${r.err != null ? r.err.toFixed(2) : "—"}</td>
+      <td><button data-i="${i}" class="del">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+  tbody.querySelectorAll('.del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const i = +btn.dataset.i;
+      gcps.splice(i,1);
+      updateGcpsTable();
+      redrawGcpDots();
+    });
+  });
+}
+
+document.getElementById('clearGcps').addEventListener('click', () => {
+  gcps = [];
+  pixelClicks = [];
+  transform = null;
+  updateGcpsTable();
+  redrawGcpDots();
+  document.getElementById('wldPreview').textContent = '(fit to show)';
+  document.getElementById('downloadWld').disabled = true;
+  removeOverlay();
+  setStatus("Cleared.", "ok");
+});
+
+/*** --- Draw pixel GCP dots on image --- ***/
+function redrawGcpDots() {
+  if (!imgLoaded) return;
+  ctx.clearRect(0,0,imgCanvas.width,imgCanvas.height);
+  ctx.drawImage(img, 0, 0, imgCanvas.width, imgCanvas.height);
+  ctx.fillStyle = '#ff2d00';
+  gcps.forEach(g => {
+    const x = g.col * (imgCanvas.width / img.width);
+    const y = g.row * (imgCanvas.height / img.height);
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI*2);
+    ctx.fill();
+  });
+}
+
+/*** --- Least squares affine fit --- ***/
+function fitAffine(points) {
+  // Solve for [A B C] and [D E F] in:
+  // X = A*col + B*row + C
+  // Y = D*col + E*row + F
+  const n = points.length;
+  if (n < 3) throw new Error("Need at least 3 GCPs.");
+  let S = [0,0,0,0,0,0]; // sums: col, row, 1, col^2, row^2, col*row
+  let SX = [0,0,0]; // sum of X*col, X*row, X
+  let SY = [0,0,0]; // sum of Y*col, Y*row, Y
+  for (const p of points) {
+    const c = p.col, r = p.row, X = p.lon, Y = p.lat;
+    S[0] += c;     // Σcol
+    S[1] += r;     // Σrow
+    S[2] += 1;     // Σ1
+    S[3] += c*c;   // Σcol^2
+    S[4] += r*r;   // Σrow^2
+    S[5] += c*r;   // Σcol*row
+    SX[0] += X*c;  // ΣX*col
+    SX[1] += X*r;  // ΣX*row
+    SX[2] += X;    // ΣX
+    SY[0] += Y*c;  // ΣY*col
+    SY[1] += Y*r;  // ΣY*row
+    SY[2] += Y;    // ΣY
+  }
+  // Build normal matrix M and RHS for X and Y:
+  // M = [[Σc^2, Σcr,  Σc],
+  //      [Σcr,  Σr^2, Σr],
+  //      [Σc,   Σr,   n ]]
+  const M = [
+    [S[3], S[5], S[0]],
+    [S[5], S[4], S[1]],
+    [S[0], S[1], n   ]
+  ];
+  const solX = solve3(M, [SX[0], SX[1], SX[2]]);
+  const solY = solve3(M, [SY[0], SY[1], SY[2]]);
+  return { A: solX[0], B: solX[1], C: solX[2],
+           D: solY[0], E: solY[1], F: solY[2] };
+}
+
+function solve3(M, b) {
+  // Simple 3x3 solver (Cramer's / Gaussian). M is 3x3, b is 3.
+  const a=M[0][0], b1=M[0][1], c=M[0][2];
+  const d=M[1][0], e=M[1][1], f=M[1][2];
+  const g=M[2][0], h=M[2][1], i=M[2][2];
+  const det = a*(e*i - f*h) - b1*(d*i - f*g) + c*(d*h - e*g);
+  if (Math.abs(det) < 1e-12) throw new Error("Singular matrix. Bad GCPs.");
+  const inv = [
+    [(e*i - f*h)/det, (c*h - b1*i)/det, (b1*f - c*e)/det],
+    [(f*g - d*i)/det, (a*i - c*g)/det, (c*d - a*f)/det],
+    [(d*h - e*g)/det, (b1*g - a*h)/det, (a*e - b1*d)/det],
+  ];
+  const x = [
+    inv[0][0]*b[0] + inv[0][1]*b[1] + inv[0][2]*b[2],
+    inv[1][0]*b[0] + inv[1][1]*b[1] + inv[1][2]*b[2],
+    inv[2][0]*b[0] + inv[2][1]*b[1] + inv[2][2]*b[2],
+  ];
+  return x;
+}
+
+function residuals(points, T) {
+  return points.map(p => {
+    const X = T.A*p.col + T.B*p.row + T.C;
+    const Y = T.D*p.col + T.E*p.row + T.F;
+    const dx = X - p.lon;
+    const dy = Y - p.lat;
+    const err = Math.hypot(dx, dy);
+    return {dx, dy, err};
+  });
+}
+
+function rms(points, T) {
+  const res = residuals(points, T);
+  if (res.length === 0) return null;
+  const sse = res.reduce((a,r) => a + r.err*r.err, 0);
+  return Math.sqrt(sse / res.length);
+}
+
+/*** --- Fit button --- ***/
+document.getElementById('fit').addEventListener('click', () => {
+  try {
+    if (gcps.length < 3) throw new Error("Add at least 3 control points.");
+    transform = fitAffine(gcps);
+    updateGcpsTable();
+    const r = rms(gcps, transform);
+    document.getElementById('rms').textContent = `RMS: ${r.toFixed(2)}`;
+    showWorldFilePreview(transform);
+    document.getElementById('downloadWld').disabled = false;
+    drawOverlay(transform);
+    setStatus("Transform fit OK.", "ok");
+  } catch (e) {
+    setStatus(e.message, "warn");
+  }
+});
+
+/*** --- World file preview / download --- ***/
+function showWorldFilePreview(T) {
+  const lines = [
+    T.A, T.D, T.B, T.E, T.C, T.F
+  ].map(v => v.toPrecision(12));
+  document.getElementById('wldPreview').textContent = lines.join('\n');
+}
+
+document.getElementById('downloadWld').addEventListener('click', () => {
+  if (!transform) return;
+  const name = (document.getElementById('file').files[0]?.name || 'image')
+               .replace(/\.[^.]+$/, '');
+  const ext = document.getElementById('wldExt').value;
+  const lines = [transform.A, transform.D, transform.B, transform.E, transform.C, transform.F]
+    .map(v => v.toPrecision(12)).join('\n');
+  downloadText(`${name}${ext}`, lines);
+});
+
+document.getElementById('downloadPrj').addEventListener('click', () => {
+  const crsSel = document.getElementById('crs').value;
+  let wkt = document.getElementById('wkt').value.trim();
+  if (!wkt) {
+    wkt = WKT_DICT[crsSel] || '';
+  }
+  if (!wkt) {
+    setStatus("No WKT set. Choose EPSG above or paste WKT.", "warn");
+    return;
+  }
+  const name = (document.getElementById('file').files[0]?.name || 'image')
+               .replace(/\.[^.]+$/, '');
+  downloadText(`${name}.prj`, wkt);
+});
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/*** --- Map overlay preview --- ***/
+function drawOverlay(T) {
+  removeOverlay();
+  if (!imgLoaded) return;
+  // Transform image corners through affine
+  const corners = [
+    {col:0,          row:0},            // UL
+    {col:img.width,  row:0},            // UR
+    {col:img.width,  row:img.height},   // LR
+    {col:0,          row:img.height}    // LL
+  ].map(p => [ T.A*p.col + T.B*p.row + T.C,
+               T.D*p.col + T.E*p.row + T.F ]); // [lon, lat]
+  // Use bounds from UL and LR if unrotated; if rotated, approximate with min/max
+  const lons = corners.map(c=>c[0]), lats = corners.map(c=>c[1]);
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const bounds = [[minLat, minLon], [maxLat, maxLon]];
+
+  // Create a temporary data URL of the original image
+  overlay = L.imageOverlay(img.src, bounds, {opacity: 0.7}).addTo(map);
+  map.fitBounds(bounds, {padding:[20,20]});
+}
+
+function removeOverlay() {
+  if (overlay) { map.removeLayer(overlay); overlay = null; }
+}
+
+/*** --- UX helpers --- ***/
+function setStatus(msg, cls) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = cls === 'ok' ? 'ok' : 'warn';
+}
+</script>
+</body>
+</html>
