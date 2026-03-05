@@ -36,3 +36,9 @@
 - Replaced axis-aligned `L.imageOverlay` bounds preview with a custom affine overlay layer that maps image pixels to map layer coordinates using transformed UL/UR/LL corners.
 - Kept `fitBounds` behavior using all four transformed image corners for reliable framing after fit.
 - Performed diagnostics check on `index.html`; no file-level errors found.
+
+## 2026-03-06 (overlay opacity control)
+- Added an overlay opacity slider (0-100%) in the sidebar to compare transformed image vs basemap more efficiently.
+- Wired live opacity updates to the custom affine overlay layer via `setOpacity`.
+- Preserved selected opacity when re-fitting transforms by storing opacity as state and reusing it during overlay creation.
+- Performed diagnostics check on `index.html`; no file-level errors found.
