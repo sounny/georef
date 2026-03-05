@@ -9,9 +9,10 @@
     .app { display: grid; grid-template-columns: 420px 1fr; height: 100%; }
     .left { padding: 12px; overflow: auto; border-right: 1px solid #ddd; }
     .right { display: grid; grid-template-rows: 1fr 180px; }
-    #imgPane { border: 1px solid #ccc; width: 100%; height: 420px; display:flex; align-items:center; justify-content:center; background:#f8f8f8;}
-    #imgCanvas { max-width: 100%; max-height: 100%; }
+    #imgPane { border: 1px solid #ccc; width: 100%; height: 420px; background:#f8f8f8; overflow:hidden; }
+    #imgCanvas { width: 100%; height: 100%; display:block; cursor: crosshair; }
     #map { width: 100%; height: 100%; }
+    .affine-preview-layer { transform-origin: 0 0; pointer-events: none; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { border-bottom: 1px solid #eee; padding: 6px 4px; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -20,6 +21,7 @@
     .warn { color: #b00020; }
     .ok { color: #0a7f2e; }
     .controls { display:flex; flex-wrap:wrap; gap:8px; align-items: center; }
+    .img-controls { margin: 8px 0; }
     .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: pre; background: #fafafa; border: 1px solid #eee; padding: 8px; }
   </style>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -30,6 +32,12 @@
     <h2>Image</h2>
     <input type="file" id="file" accept="image/*" />
     <div id="imgPane"><canvas id="imgCanvas"></canvas></div>
+    <div class="controls img-controls">
+      <button id="zoomOut" type="button">−</button>
+      <button id="zoomIn" type="button">+</button>
+      <button id="zoomReset" type="button">Reset View</button>
+      <span id="zoomLevel" class="badge">Zoom: —</span>
+    </div>
     <p>Click the image to add a pixel point. Then click the map to set its ground location.</p>
 
     <h3>Control Points</h3>
@@ -47,6 +55,12 @@
 
     <h3>CRS & Output</h3>
     <div class="row">
+      <label>Basemap
+        <select id="basemapMode">
+          <option value="satellite">Satellite (Esri)</option>
+          <option value="streets">Streets (OSM)</option>
+        </select>
+      </label>
       <label>CRS
         <select id="crs">
           <option value="EPSG:4326">EPSG:4326 (WGS84)</option>
@@ -70,6 +84,11 @@
       <button id="fit">Fit Transform</button>
       <button id="downloadWld" disabled>Download World File</button>
       <button id="downloadPrj">Download .prj</button>
+    </div>
+    <div class="controls" style="margin-top:8px;">
+      <label for="overlayOpacity">Overlay opacity</label>
+      <input id="overlayOpacity" type="range" min="0" max="100" step="1" value="70" />
+      <span id="overlayOpacityValue" class="badge">70%</span>
     </div>
 
     <h3>World File Preview</h3>
@@ -116,6 +135,19 @@ let gcps = []; // {col,row, lon,lat}
 let transform = null; // {A,B,C,D,E,F}
 let overlay = null; // Leaflet ImageOverlay
 let gcpMarkers = []; // Leaflet markers for GCPs
+let overlayOpacity = 0.7;
+let suppressNextImageClick = false;
+let view = {
+  scale: 1,
+  minScale: 1,
+  maxScale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  isPanning: false,
+  panMoved: false,
+  lastX: 0,
+  lastY: 0
+};
 
 /*** --- Image pane --- ***/
 document.getElementById('file').addEventListener('change', ev => {
@@ -123,16 +155,10 @@ document.getElementById('file').addEventListener('change', ev => {
   if (!f) return;
   const url = URL.createObjectURL(f);
   img.onload = () => {
-    // Resize canvas to fit panel but keep aspect
     const pane = document.getElementById('imgPane');
-    const maxW = pane.clientWidth - 4;
-    const maxH = pane.clientHeight - 4;
-    const scale = Math.min(maxW / img.width, maxH / img.height, 1);
-    imgCanvas.width = Math.round(img.width * scale);
-    imgCanvas.height = Math.round(img.height * scale);
-    ctx.imageSmoothingEnabled = true;
-    ctx.clearRect(0,0,imgCanvas.width,imgCanvas.height);
-    ctx.drawImage(img, 0, 0, imgCanvas.width, imgCanvas.height);
+    imgCanvas.width = Math.max(1, pane.clientWidth);
+    imgCanvas.height = Math.max(1, pane.clientHeight);
+    initImageView();
     imgLoaded = true;
     redrawGcpDots();
   };
@@ -141,22 +167,178 @@ document.getElementById('file').addEventListener('change', ev => {
 
 imgCanvas.addEventListener('click', ev => {
   if (!imgLoaded) return;
+  if (suppressNextImageClick) {
+    suppressNextImageClick = false;
+    return;
+  }
   const rect = imgCanvas.getBoundingClientRect();
   const x = ev.clientX - rect.left;
   const y = ev.clientY - rect.top;
-  // Convert back to native pixel coordinates
-  const col = x * (img.width / imgCanvas.width);
-  const row = y * (img.height / imgCanvas.height);
+  const { col, row } = canvasToImage(x, y);
+  if (!isInsideImage(col, row)) {
+    setStatus("Click inside the image area.", "warn");
+    return;
+  }
   pixelClicks.push({col, row});
   redrawGcpDots();
   setStatus("Image point set. Click the map to pair it.", "ok");
 });
 
+imgCanvas.addEventListener('mousedown', ev => {
+  const shouldPan = ev.button === 1 || ev.button === 2 || (ev.button === 0 && ev.shiftKey);
+  if (!shouldPan || !imgLoaded) return;
+  ev.preventDefault();
+  view.isPanning = true;
+  view.panMoved = false;
+  view.lastX = ev.clientX;
+  view.lastY = ev.clientY;
+  imgCanvas.style.cursor = 'grabbing';
+});
+
+imgCanvas.addEventListener('mousemove', ev => {
+  if (!view.isPanning) return;
+  const dx = ev.clientX - view.lastX;
+  const dy = ev.clientY - view.lastY;
+  if (dx !== 0 || dy !== 0) {
+    view.panMoved = true;
+  }
+  view.lastX = ev.clientX;
+  view.lastY = ev.clientY;
+  view.offsetX += dx;
+  view.offsetY += dy;
+  redrawGcpDots();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!view.isPanning) return;
+  suppressNextImageClick = view.panMoved;
+  view.isPanning = false;
+  imgCanvas.style.cursor = 'crosshair';
+});
+
+imgCanvas.addEventListener('wheel', ev => {
+  if (!imgLoaded) return;
+  ev.preventDefault();
+  const rect = imgCanvas.getBoundingClientRect();
+  const x = ev.clientX - rect.left;
+  const y = ev.clientY - rect.top;
+  const factor = ev.deltaY < 0 ? 1.15 : (1 / 1.15);
+  zoomAtPoint(x, y, factor);
+}, { passive: false });
+
+imgCanvas.addEventListener('contextmenu', ev => ev.preventDefault());
+
+document.getElementById('zoomIn').addEventListener('click', () => {
+  if (!imgLoaded) return;
+  zoomAtPoint(imgCanvas.width / 2, imgCanvas.height / 2, 1.2);
+});
+
+document.getElementById('zoomOut').addEventListener('click', () => {
+  if (!imgLoaded) return;
+  zoomAtPoint(imgCanvas.width / 2, imgCanvas.height / 2, 1 / 1.2);
+});
+
+document.getElementById('zoomReset').addEventListener('click', () => {
+  if (!imgLoaded) return;
+  initImageView();
+  redrawGcpDots();
+});
+
 /*** --- Leaflet map --- ***/
-const map = L.map('map').setView([0,0], 2);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+const streetsLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap'
-}).addTo(map);
+});
+const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles &copy; Esri'
+});
+const map = L.map('map', { layers: [satelliteLayer] }).setView([0,0], 2);
+L.control.layers({
+  'Satellite (Esri)': satelliteLayer,
+  'Streets (OSM)': streetsLayer
+}, null, {collapsed: true}).addTo(map);
+
+function setBasemap(mode) {
+  if (mode === 'streets') {
+    if (!map.hasLayer(streetsLayer)) map.addLayer(streetsLayer);
+    if (map.hasLayer(satelliteLayer)) map.removeLayer(satelliteLayer);
+  } else {
+    if (!map.hasLayer(satelliteLayer)) map.addLayer(satelliteLayer);
+    if (map.hasLayer(streetsLayer)) map.removeLayer(streetsLayer);
+  }
+}
+
+document.getElementById('basemapMode').addEventListener('change', ev => {
+  setBasemap(ev.target.value);
+});
+
+document.getElementById('overlayOpacity').addEventListener('input', ev => {
+  overlayOpacity = Number(ev.target.value) / 100;
+  document.getElementById('overlayOpacityValue').textContent = `${Math.round(overlayOpacity * 100)}%`;
+  if (overlay && typeof overlay.setOpacity === 'function') {
+    overlay.setOpacity(overlayOpacity);
+  }
+});
+
+const AffineImageOverlay = L.Layer.extend({
+  initialize: function(url, cornerLatLngs, options = {}) {
+    this._url = url;
+    this._corners = cornerLatLngs; // [UL, UR, LL]
+    L.setOptions(this, options);
+  },
+
+  onAdd: function(map) {
+    this._map = map;
+    if (!this._img) {
+      this._img = L.DomUtil.create('img', 'leaflet-image-layer affine-preview-layer');
+      this._img.alt = '';
+      this._img.src = this._url;
+      this._img.style.position = 'absolute';
+    }
+    map.getPanes().overlayPane.appendChild(this._img);
+    this._applyOpacity();
+    map.on('zoom viewreset move resize', this._reset, this);
+    this._reset();
+  },
+
+  onRemove: function(map) {
+    map.off('zoom viewreset move resize', this._reset, this);
+    if (this._img && this._img.parentNode) {
+      this._img.parentNode.removeChild(this._img);
+    }
+  },
+
+  _applyOpacity: function() {
+    if (!this._img) return;
+    this._img.style.opacity = String(this.options.opacity ?? 1);
+  },
+
+  setOpacity: function(opacity) {
+    this.options.opacity = opacity;
+    this._applyOpacity();
+  },
+
+  _reset: function() {
+    if (!this._img || !this._map) return;
+    const width = this.options.width;
+    const height = this.options.height;
+    if (!width || !height) return;
+
+    const ul = this._map.latLngToLayerPoint(this._corners[0]);
+    const ur = this._map.latLngToLayerPoint(this._corners[1]);
+    const ll = this._map.latLngToLayerPoint(this._corners[2]);
+
+    const a = (ur.x - ul.x) / width;
+    const b = (ur.y - ul.y) / width;
+    const c = (ll.x - ul.x) / height;
+    const d = (ll.y - ul.y) / height;
+    const e = ul.x;
+    const f = ul.y;
+
+    this._img.style.width = `${width}px`;
+    this._img.style.height = `${height}px`;
+    this._img.style.transform = `matrix(${a},${b},${c},${d},${e},${f})`;
+  }
+});
 
 map.on('click', ev => {
   if (pixelClicks.length === 0) {
@@ -218,24 +400,79 @@ document.getElementById('clearGcps').addEventListener('click', () => {
 /*** --- Draw pixel GCP dots on image --- ***/
 function redrawGcpDots() {
   if (!imgLoaded) return;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0,0,imgCanvas.width,imgCanvas.height);
-  ctx.drawImage(img, 0, 0, imgCanvas.width, imgCanvas.height);
+  ctx.fillStyle = '#f8f8f8';
+  ctx.fillRect(0, 0, imgCanvas.width, imgCanvas.height);
+  ctx.drawImage(img, view.offsetX, view.offsetY, img.width * view.scale, img.height * view.scale);
   ctx.fillStyle = '#ff2d00';
   gcps.forEach(g => {
-    const x = g.col * (imgCanvas.width / img.width);
-    const y = g.row * (imgCanvas.height / img.height);
+    const {x, y} = imageToCanvas(g.col, g.row);
     ctx.beginPath();
     ctx.arc(x, y, 4, 0, Math.PI*2);
     ctx.fill();
   });
   ctx.fillStyle = '#0086ff';
   pixelClicks.forEach(p => {
-    const x = p.col * (imgCanvas.width / img.width);
-    const y = p.row * (imgCanvas.height / img.height);
+    const {x, y} = imageToCanvas(p.col, p.row);
     ctx.beginPath();
     ctx.arc(x, y, 4, 0, Math.PI*2);
     ctx.fill();
   });
+  updateZoomBadge();
+}
+
+function initImageView() {
+  const fitScale = Math.min(imgCanvas.width / img.width, imgCanvas.height / img.height);
+  view.minScale = fitScale * 0.5;
+  view.maxScale = fitScale * 30;
+  view.scale = fitScale;
+  view.offsetX = (imgCanvas.width - img.width * view.scale) / 2;
+  view.offsetY = (imgCanvas.height - img.height * view.scale) / 2;
+}
+
+function zoomAtPoint(canvasX, canvasY, factor) {
+  const nextScale = clamp(view.scale * factor, view.minScale, view.maxScale);
+  if (nextScale === view.scale) return;
+  const imgX = (canvasX - view.offsetX) / view.scale;
+  const imgY = (canvasY - view.offsetY) / view.scale;
+  view.scale = nextScale;
+  view.offsetX = canvasX - imgX * view.scale;
+  view.offsetY = canvasY - imgY * view.scale;
+  redrawGcpDots();
+}
+
+function imageToCanvas(col, row) {
+  return {
+    x: view.offsetX + col * view.scale,
+    y: view.offsetY + row * view.scale
+  };
+}
+
+function canvasToImage(x, y) {
+  return {
+    col: (x - view.offsetX) / view.scale,
+    row: (y - view.offsetY) / view.scale
+  };
+}
+
+function isInsideImage(col, row) {
+  return col >= 0 && col <= img.width && row >= 0 && row <= img.height;
+}
+
+function updateZoomBadge() {
+  const badge = document.getElementById('zoomLevel');
+  if (!imgLoaded) {
+    badge.textContent = 'Zoom: —';
+    return;
+  }
+  const fitScale = Math.min(imgCanvas.width / img.width, imgCanvas.height / img.height);
+  const ratio = (view.scale / fitScale) * 100;
+  badge.textContent = `Zoom: ${ratio.toFixed(0)}%`;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 /*** --- Least squares affine fit --- ***/
@@ -387,14 +624,17 @@ function drawOverlay(T) {
     {col:0,          row:img.height}    // LL
   ].map(p => [ T.A*p.col + T.B*p.row + T.C,
                T.D*p.col + T.E*p.row + T.F ]); // [lon, lat]
-  // Use bounds from UL and LR if unrotated; if rotated, approximate with min/max
-  const lons = corners.map(c=>c[0]), lats = corners.map(c=>c[1]);
-  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-  const bounds = [[minLat, minLon], [maxLat, maxLon]];
+  const ul = L.latLng(corners[0][1], corners[0][0]);
+  const ur = L.latLng(corners[1][1], corners[1][0]);
+  const lr = L.latLng(corners[2][1], corners[2][0]);
+  const ll = L.latLng(corners[3][1], corners[3][0]);
+  const bounds = L.latLngBounds([ul, ur, lr, ll]);
 
-  // Create a temporary data URL of the original image
-  overlay = L.imageOverlay(img.src, bounds, {opacity: 0.7}).addTo(map);
+  overlay = new AffineImageOverlay(img.src, [ul, ur, ll], {
+    width: img.width,
+    height: img.height,
+    opacity: overlayOpacity
+  }).addTo(map);
   map.fitBounds(bounds, {padding:[20,20]});
 }
 
