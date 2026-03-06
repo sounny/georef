@@ -42,3 +42,14 @@
 - Wired live opacity updates to the custom affine overlay layer via `setOpacity`.
 - Preserved selected opacity when re-fitting transforms by storing opacity as state and reusing it during overlay creation.
 - Performed diagnostics check on `index.html`; no file-level errors found.
+
+## 2026-03-06 (full code review + improvements)
+- Reviewed `index.html` for usability/performance bottlenecks and tightened several hot paths without changing core workflow.
+- Improved image lifecycle handling: reset app state on new upload, revoke previous object URLs, and added image load error handling.
+- Improved rendering performance during pan/zoom by batching canvas redraws with `requestAnimationFrame` (`requestRedraw`).
+- Improved responsiveness/usability by resizing the image canvas on window resize while preserving current image focus in the viewport.
+- Improved table performance by replacing per-row delete listeners with a single delegated click handler on the GCP table body.
+- Improved UX clarity by changing residual column label from meters to map units (`Res (map)`), avoiding misleading unit assumptions.
+- Synced sidebar basemap selector with Leaflet layer control changes (`baselayerchange`) for consistent UI state.
+- Replaced repeated DOM queries with cached element references in key paths (status, RMS, downloads, opacity, etc.).
+- Performed diagnostics check on `index.html`; no file-level errors found.

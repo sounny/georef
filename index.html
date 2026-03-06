@@ -43,7 +43,7 @@
     <h3>Control Points</h3>
     <table id="gcpsTable">
       <thead><tr>
-        <th>#</th><th>Pixel (col,row)</th><th>Map (lon,lat)</th><th>Res (m)</th><th></th>
+        <th>#</th><th>Pixel (col,row)</th><th>Map (lon,lat)</th><th>Res (map)</th><th></th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -136,6 +136,8 @@ let transform = null; // {A,B,C,D,E,F}
 let overlay = null; // Leaflet ImageOverlay
 let gcpMarkers = []; // Leaflet markers for GCPs
 let overlayOpacity = 0.7;
+let currentImageObjectUrl = null;
+let redrawQueued = false;
 let suppressNextImageClick = false;
 let view = {
   scale: 1,
@@ -149,20 +151,53 @@ let view = {
   lastY: 0
 };
 
+const fileInput = document.getElementById('file');
+const gcpsTbody = document.querySelector('#gcpsTable tbody');
+const zoomLevelBadge = document.getElementById('zoomLevel');
+const statusEl = document.getElementById('status');
+const overlayOpacityInput = document.getElementById('overlayOpacity');
+const overlayOpacityValue = document.getElementById('overlayOpacityValue');
+const basemapModeSelect = document.getElementById('basemapMode');
+const wldPreviewEl = document.getElementById('wldPreview');
+const downloadWldBtn = document.getElementById('downloadWld');
+const rmsBadge = document.getElementById('rms');
+
 /*** --- Image pane --- ***/
-document.getElementById('file').addEventListener('change', ev => {
+fileInput.addEventListener('change', ev => {
   const f = ev.target.files[0];
   if (!f) return;
+  resetForNewImage();
+  if (currentImageObjectUrl) {
+    URL.revokeObjectURL(currentImageObjectUrl);
+    currentImageObjectUrl = null;
+  }
   const url = URL.createObjectURL(f);
+  currentImageObjectUrl = url;
   img.onload = () => {
-    const pane = document.getElementById('imgPane');
-    imgCanvas.width = Math.max(1, pane.clientWidth);
-    imgCanvas.height = Math.max(1, pane.clientHeight);
+    resizeImageCanvas(false);
     initImageView();
     imgLoaded = true;
-    redrawGcpDots();
+    requestRedraw();
+    setStatus("Image loaded. Pick a point on image, then map.", "ok");
+  };
+  img.onerror = () => {
+    imgLoaded = false;
+    setStatus("Could not load image file.", "warn");
   };
   img.src = url;
+});
+
+window.addEventListener('resize', () => {
+  if (!imgLoaded) return;
+  resizeImageCanvas(true);
+  requestRedraw();
+});
+
+window.addEventListener('beforeunload', () => {
+  if (currentImageObjectUrl) {
+    URL.revokeObjectURL(currentImageObjectUrl);
+    currentImageObjectUrl = null;
+  }
 });
 
 imgCanvas.addEventListener('click', ev => {
@@ -180,7 +215,7 @@ imgCanvas.addEventListener('click', ev => {
     return;
   }
   pixelClicks.push({col, row});
-  redrawGcpDots();
+  requestRedraw();
   setStatus("Image point set. Click the map to pair it.", "ok");
 });
 
@@ -206,7 +241,7 @@ imgCanvas.addEventListener('mousemove', ev => {
   view.lastY = ev.clientY;
   view.offsetX += dx;
   view.offsetY += dy;
-  redrawGcpDots();
+  requestRedraw();
 });
 
 window.addEventListener('mouseup', () => {
@@ -241,7 +276,7 @@ document.getElementById('zoomOut').addEventListener('click', () => {
 document.getElementById('zoomReset').addEventListener('click', () => {
   if (!imgLoaded) return;
   initImageView();
-  redrawGcpDots();
+  requestRedraw();
 });
 
 /*** --- Leaflet map --- ***/
@@ -267,13 +302,17 @@ function setBasemap(mode) {
   }
 }
 
-document.getElementById('basemapMode').addEventListener('change', ev => {
+basemapModeSelect.addEventListener('change', ev => {
   setBasemap(ev.target.value);
 });
 
-document.getElementById('overlayOpacity').addEventListener('input', ev => {
+map.on('baselayerchange', ev => {
+  basemapModeSelect.value = ev.name.includes('Streets') ? 'streets' : 'satellite';
+});
+
+overlayOpacityInput.addEventListener('input', ev => {
   overlayOpacity = Number(ev.target.value) / 100;
-  document.getElementById('overlayOpacityValue').textContent = `${Math.round(overlayOpacity * 100)}%`;
+  overlayOpacityValue.textContent = `${Math.round(overlayOpacity * 100)}%`;
   if (overlay && typeof overlay.setOpacity === 'function') {
     overlay.setOpacity(overlayOpacity);
   }
@@ -351,14 +390,26 @@ map.on('click', ev => {
   const marker = L.circleMarker([lat, lng], {radius:4, color:'#ff2d00', fillColor:'#ff2d00', fillOpacity:1}).addTo(map);
   gcpMarkers.push(marker);
   updateGcpsTable();
-  redrawGcpDots();
+  requestRedraw();
   setStatus("GCP added.", "ok");
+});
+
+gcpsTbody.addEventListener('click', ev => {
+  const btn = ev.target.closest('button.del');
+  if (!btn) return;
+  const i = Number(btn.dataset.i);
+  if (!Number.isInteger(i) || i < 0 || i >= gcps.length) return;
+  gcps.splice(i, 1);
+  gcpMarkers[i].remove();
+  gcpMarkers.splice(i, 1);
+  updateGcpsTable();
+  requestRedraw();
+  setStatus("GCP removed.", "ok");
 });
 
 /*** --- GCP table --- ***/
 function updateGcpsTable() {
-  const tbody = document.querySelector('#gcpsTable tbody');
-  tbody.innerHTML = "";
+  gcpsTbody.innerHTML = "";
   const res = transform ? residuals(gcps, transform) : [];
   gcps.forEach((g, i) => {
     const tr = document.createElement('tr');
@@ -369,17 +420,7 @@ function updateGcpsTable() {
       <td>${g.lon.toFixed(6)}, ${g.lat.toFixed(6)}</td>
       <td>${r.err != null ? r.err.toFixed(2) : "—"}</td>
       <td><button data-i="${i}" class="del">✕</button></td>`;
-    tbody.appendChild(tr);
-  });
-  tbody.querySelectorAll('.del').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const i = +btn.dataset.i;
-      gcps.splice(i,1);
-      gcpMarkers[i].remove();
-      gcpMarkers.splice(i,1);
-      updateGcpsTable();
-      redrawGcpDots();
-    });
+    gcpsTbody.appendChild(tr);
   });
 }
 
@@ -390,9 +431,10 @@ document.getElementById('clearGcps').addEventListener('click', () => {
   gcpMarkers.forEach(m => m.remove());
   gcpMarkers = [];
   updateGcpsTable();
-  redrawGcpDots();
-  document.getElementById('wldPreview').textContent = '(fit to show)';
-  document.getElementById('downloadWld').disabled = true;
+  requestRedraw();
+  wldPreviewEl.textContent = '(fit to show)';
+  downloadWldBtn.disabled = true;
+  rmsBadge.textContent = 'RMS: —';
   removeOverlay();
   setStatus("Cleared.", "ok");
 });
@@ -422,6 +464,15 @@ function redrawGcpDots() {
   updateZoomBadge();
 }
 
+function requestRedraw() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  requestAnimationFrame(() => {
+    redrawQueued = false;
+    redrawGcpDots();
+  });
+}
+
 function initImageView() {
   const fitScale = Math.min(imgCanvas.width / img.width, imgCanvas.height / img.height);
   view.minScale = fitScale * 0.5;
@@ -439,7 +490,7 @@ function zoomAtPoint(canvasX, canvasY, factor) {
   view.scale = nextScale;
   view.offsetX = canvasX - imgX * view.scale;
   view.offsetY = canvasY - imgY * view.scale;
-  redrawGcpDots();
+  requestRedraw();
 }
 
 function imageToCanvas(col, row) {
@@ -461,14 +512,52 @@ function isInsideImage(col, row) {
 }
 
 function updateZoomBadge() {
-  const badge = document.getElementById('zoomLevel');
   if (!imgLoaded) {
-    badge.textContent = 'Zoom: —';
+    zoomLevelBadge.textContent = 'Zoom: —';
     return;
   }
   const fitScale = Math.min(imgCanvas.width / img.width, imgCanvas.height / img.height);
   const ratio = (view.scale / fitScale) * 100;
-  badge.textContent = `Zoom: ${ratio.toFixed(0)}%`;
+  zoomLevelBadge.textContent = `Zoom: ${ratio.toFixed(0)}%`;
+}
+
+function resetForNewImage() {
+  imgLoaded = false;
+  gcps = [];
+  pixelClicks = [];
+  transform = null;
+  gcpMarkers.forEach(m => m.remove());
+  gcpMarkers = [];
+  updateGcpsTable();
+  wldPreviewEl.textContent = '(fit to show)';
+  downloadWldBtn.disabled = true;
+  rmsBadge.textContent = 'RMS: —';
+  removeOverlay();
+}
+
+function resizeImageCanvas(preserveView = true) {
+  const pane = document.getElementById('imgPane');
+  const nextW = Math.max(1, pane.clientWidth);
+  const nextH = Math.max(1, pane.clientHeight);
+  if (imgCanvas.width === nextW && imgCanvas.height === nextH) return;
+
+  let centerCol = img.width / 2;
+  let centerRow = img.height / 2;
+  const previousW = imgCanvas.width;
+  const previousH = imgCanvas.height;
+  if (preserveView && previousW > 0 && previousH > 0 && imgLoaded) {
+    const center = canvasToImage(previousW / 2, previousH / 2);
+    centerCol = center.col;
+    centerRow = center.row;
+  }
+
+  imgCanvas.width = nextW;
+  imgCanvas.height = nextH;
+
+  if (preserveView && imgLoaded) {
+    view.offsetX = imgCanvas.width / 2 - centerCol * view.scale;
+    view.offsetY = imgCanvas.height / 2 - centerRow * view.scale;
+  }
 }
 
 function clamp(value, min, max) {
@@ -560,9 +649,9 @@ document.getElementById('fit').addEventListener('click', () => {
     transform = fitAffine(gcps);
     updateGcpsTable();
     const r = rms(gcps, transform);
-    document.getElementById('rms').textContent = `RMS: ${r.toFixed(2)}`;
+    rmsBadge.textContent = `RMS: ${r.toFixed(2)}`;
     showWorldFilePreview(transform);
-    document.getElementById('downloadWld').disabled = false;
+    downloadWldBtn.disabled = false;
     drawOverlay(transform);
     setStatus("Transform fit OK.", "ok");
   } catch (e) {
@@ -580,7 +669,7 @@ function showWorldFilePreview(T) {
 
 document.getElementById('downloadWld').addEventListener('click', () => {
   if (!transform) return;
-  const name = (document.getElementById('file').files[0]?.name || 'image')
+  const name = (fileInput.files[0]?.name || 'image')
                .replace(/\.[^.]+$/, '');
   const ext = document.getElementById('wldExt').value;
   const lines = [transform.A, transform.D, transform.B, transform.E, transform.C, transform.F]
@@ -598,7 +687,7 @@ document.getElementById('downloadPrj').addEventListener('click', () => {
     setStatus("No WKT set. Choose EPSG above or paste WKT.", "warn");
     return;
   }
-  const name = (document.getElementById('file').files[0]?.name || 'image')
+  const name = (fileInput.files[0]?.name || 'image')
                .replace(/\.[^.]+$/, '');
   downloadText(`${name}.prj`, wkt);
 });
@@ -644,9 +733,8 @@ function removeOverlay() {
 
 /*** --- UX helpers --- ***/
 function setStatus(msg, cls) {
-  const el = document.getElementById('status');
-  el.textContent = msg;
-  el.className = cls === 'ok' ? 'ok' : 'warn';
+  statusEl.textContent = msg;
+  statusEl.className = cls === 'ok' ? 'ok' : 'warn';
 }
 </script>
 </body>
