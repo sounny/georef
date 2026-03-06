@@ -53,3 +53,10 @@
 - Synced sidebar basemap selector with Leaflet layer control changes (`baselayerchange`) for consistent UI state.
 - Replaced repeated DOM queries with cached element references in key paths (status, RMS, downloads, opacity, etc.).
 - Performed diagnostics check on `index.html`; no file-level errors found.
+
+## 2026-03-06 (sample image + WPB zoom)
+- Added a `Load Sample` button next to the file input to load bundled sample image `12099_1984_51_79.jpg`.
+- Refactored image loading into a shared `loadImageSource` function used by both file uploads and sample loading.
+- Added sample-load behavior to center the map on West Palm Beach, Florida at zoom level 13 for faster alignment workflow.
+- Added `currentImageName` state so world/prj downloads use the correct base filename for both uploaded and sample-loaded images.
+- Performed diagnostics check on `index.html`; no file-level errors found.

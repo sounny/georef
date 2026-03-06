@@ -30,7 +30,10 @@
 <div class="app">
   <div class="left">
     <h2>Image</h2>
-    <input type="file" id="file" accept="image/*" />
+    <div class="controls">
+      <input type="file" id="file" accept="image/*" />
+      <button id="loadSample" type="button">Load Sample</button>
+    </div>
     <div id="imgPane"><canvas id="imgCanvas"></canvas></div>
     <div class="controls img-controls">
       <button id="zoomOut" type="button">−</button>
@@ -137,6 +140,7 @@ let overlay = null; // Leaflet ImageOverlay
 let gcpMarkers = []; // Leaflet markers for GCPs
 let overlayOpacity = 0.7;
 let currentImageObjectUrl = null;
+let currentImageName = 'image';
 let redrawQueued = false;
 let suppressNextImageClick = false;
 let view = {
@@ -161,30 +165,35 @@ const basemapModeSelect = document.getElementById('basemapMode');
 const wldPreviewEl = document.getElementById('wldPreview');
 const downloadWldBtn = document.getElementById('downloadWld');
 const rmsBadge = document.getElementById('rms');
+const loadSampleBtn = document.getElementById('loadSample');
+
+const SAMPLE_IMAGE_PATH = '12099_1984_51_79.jpg';
+const SAMPLE_IMAGE_NAME = '12099_1984_51_79.jpg';
+const WEST_PALM_BEACH = { lat: 26.7153, lon: -80.0534, zoom: 13 };
 
 /*** --- Image pane --- ***/
 fileInput.addEventListener('change', ev => {
   const f = ev.target.files[0];
   if (!f) return;
-  resetForNewImage();
   if (currentImageObjectUrl) {
     URL.revokeObjectURL(currentImageObjectUrl);
     currentImageObjectUrl = null;
   }
   const url = URL.createObjectURL(f);
   currentImageObjectUrl = url;
-  img.onload = () => {
-    resizeImageCanvas(false);
-    initImageView();
-    imgLoaded = true;
-    requestRedraw();
-    setStatus("Image loaded. Pick a point on image, then map.", "ok");
-  };
-  img.onerror = () => {
-    imgLoaded = false;
-    setStatus("Could not load image file.", "warn");
-  };
-  img.src = url;
+  loadImageSource(url, f.name);
+});
+
+loadSampleBtn.addEventListener('click', () => {
+  if (currentImageObjectUrl) {
+    URL.revokeObjectURL(currentImageObjectUrl);
+    currentImageObjectUrl = null;
+  }
+  fileInput.value = '';
+  loadImageSource(SAMPLE_IMAGE_PATH, SAMPLE_IMAGE_NAME, {
+    recenterMap: true,
+    center: WEST_PALM_BEACH
+  });
 });
 
 window.addEventListener('resize', () => {
@@ -535,6 +544,26 @@ function resetForNewImage() {
   removeOverlay();
 }
 
+function loadImageSource(src, name, options = {}) {
+  resetForNewImage();
+  currentImageName = (name || 'image').replace(/\.[^.]+$/, '');
+  img.onload = () => {
+    resizeImageCanvas(false);
+    initImageView();
+    imgLoaded = true;
+    requestRedraw();
+    if (options.recenterMap && options.center) {
+      map.setView([options.center.lat, options.center.lon], options.center.zoom ?? map.getZoom());
+    }
+    setStatus("Image loaded. Pick a point on image, then map.", "ok");
+  };
+  img.onerror = () => {
+    imgLoaded = false;
+    setStatus("Could not load image file.", "warn");
+  };
+  img.src = src;
+}
+
 function resizeImageCanvas(preserveView = true) {
   const pane = document.getElementById('imgPane');
   const nextW = Math.max(1, pane.clientWidth);
@@ -669,8 +698,7 @@ function showWorldFilePreview(T) {
 
 document.getElementById('downloadWld').addEventListener('click', () => {
   if (!transform) return;
-  const name = (fileInput.files[0]?.name || 'image')
-               .replace(/\.[^.]+$/, '');
+  const name = currentImageName || 'image';
   const ext = document.getElementById('wldExt').value;
   const lines = [transform.A, transform.D, transform.B, transform.E, transform.C, transform.F]
     .map(v => v.toPrecision(12)).join('\n');
@@ -687,8 +715,7 @@ document.getElementById('downloadPrj').addEventListener('click', () => {
     setStatus("No WKT set. Choose EPSG above or paste WKT.", "warn");
     return;
   }
-  const name = (fileInput.files[0]?.name || 'image')
-               .replace(/\.[^.]+$/, '');
+  const name = currentImageName || 'image';
   downloadText(`${name}.prj`, wkt);
 });
 
