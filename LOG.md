@@ -60,3 +60,10 @@
 - Added sample-load behavior to center the map on West Palm Beach, Florida at zoom level 13 for faster alignment workflow.
 - Added `currentImageName` state so world/prj downloads use the correct base filename for both uploaded and sample-loaded images.
 - Performed diagnostics check on `index.html`; no file-level errors found.
+
+## 2026-03-14 (ui/ux polish pass)
+- Refined the interface into a clearer 3-step workflow with sectioned panels for image loading, GCP management, and export settings.
+- Applied a cohesive modern dark theme (improved spacing, hierarchy, controls, badges, and map help strip) to improve readability and reduce cognitive load.
+- Improved responsive behavior for smaller screens by collapsing to a stacked layout and resizing the image pane for mobile/tablet widths.
+- Kept existing georeferencing behavior intact while making interactions and labels more discoverable.
+- Ran repository checks and captured an updated UI screenshot for verification.
